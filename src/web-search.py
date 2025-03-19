@@ -1,9 +1,8 @@
 import json
 import requests
-import math
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-from sklearn.cluster import KMeans
 import os
 
 # get conf
@@ -160,7 +159,15 @@ def google_search(state: State):
 @log_node_execution("fetch_web_pages_to_documents")
 def fetch_web_pages_to_documents(state: State):
     loader = WebBaseLoader(web_path=state["urls"])
-    return {"web_documents": loader.load()}
+    web_documents = loader.load()
+    
+    for i, doc in enumerate(web_documents):
+        file_path = f"/webSearch/ref{i + 1}.txt"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(doc.page_content)
+        print(f"Document saved to {file_path}")
+    
+    return {"web_documents": web_documents}
 
 
 @log_node_execution("chunking_documents")
@@ -168,7 +175,8 @@ def chunking_documents(state: State):
     # 10000 only for testing, actual value should be prompt tokens
     token_calculator = TokenLengthCalculator(model_name)
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=(model_info[model_name].max_input - 10000),
+        # chunk_size=(model_info[model_name].max_input - 10000),
+        chunk_size=1000,
         chunk_overlap=100,
         separators=["\n\n", "\n", " ", ""],
         length_function=token_calculator.tiktoken_len,
@@ -180,85 +188,124 @@ def chunking_documents(state: State):
     return {"chunked_documents": chunked_documents}
 
 
-@log_node_execution("cluster_documents")
-def cluster_documents(documents, cluster_size):
-    def num_tokens_from_string(string: str) -> int:
-        """Returns the number of tokens in a text string."""
-        encoding = tiktoken.get_encoding("cl100k_base")
-        num_tokens = len(encoding.encode(string))
-        return num_tokens
+# @log_node_execution("cluster_documents")
+# def cluster_documents(documents, cluster_size):
+#     def num_tokens_from_string(string: str) -> int:
+#         """Returns the number of tokens in a text string."""
+#         encoding = tiktoken.get_encoding("cl100k_base")
+#         num_tokens = len(encoding.encode(string))
+#         return num_tokens
 
+#     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
+
+#     def process_embedding(content):
+#         used_token = num_tokens_from_string(content)
+#         return embeddings.embed_documents([content])[0], used_token
+
+#     with ThreadPoolExecutor(max_workers=5) as executor:
+#         futures = {
+#             executor.submit(process_embedding, doc.page_content): i
+#             for i, doc in enumerate(documents)
+#         }
+#         vectors = []
+
+#         for future in as_completed(futures):
+#             try:
+#                 result, used_token = future.result()
+#                 vectors.append(result)
+#             except Exception as e:
+#                 print(f"Error embedding document index {futures[future]}: {e}")
+
+#     vectors = np.array(vectors)
+#     kmeans = KMeans(n_clusters=cluster_size, random_state=42).fit(vectors)
+
+#     closest_indices = []
+#     for i in range(cluster_size):
+#         distances = np.linalg.norm(vectors - kmeans.cluster_centers_[i], axis=1)
+#         closest_index = np.argmin(distances)
+#         closest_indices.append(closest_index)
+
+#     selected_indices = sorted(closest_indices)
+#     new_docs = [documents[index] for index in selected_indices]
+#     return {"chunked_documents": new_docs}
+
+
+# @log_node_execution("need_cluster")
+# def need_cluster(state: State) -> str:
+#     if len(state["chunked_documents"]) > math.floor(
+#         model_info[model_name].max_input / model_info[model_name].max_output
+#     ):
+#         return "Y"
+#     return "N"
+
+
+# @log_node_execution("calc_documents_token")
+# def calc_documents_token(state: State):
+#     token_calculator = TokenLengthCalculator(model_name)
+#     total_tokens = 0
+#     for doc in state["chunked_documents"]:
+#         total_tokens += token_calculator.tiktoken_len(doc)
+#     return {"total_tokens": total_tokens}
+
+
+# @log_node_execution("need_map")
+# def need_map(state: State) -> str:
+#     if state["total_tokens"] > model_info[model_name].max_input:
+#         return "Y"
+#     return "N"
+
+# @log_node_execution("need_reduce")
+# def need_reduce(state: State) -> str:
+#     if state["total_tokens"] > model_info[model_name].max_input:
+#         return "Y"
+#     return "N"
+
+
+# @log_node_execution("map_documents")
+# def map_documents(state: State):
+#     map_documents = []
+#     for doc in state["chunked_documents"]:
+#         stripped_document = doc.replace("\n", " ").strip()
+#         document_summarize = ask_llm(stripped_document, "請為以下的文本生成摘要")
+#         map_documents.append(document_summarize)
+#     breakpoint()
+#     return {"chunked_documents": map_documents}
+
+# @log_node_execution("reduce_documents")
+# def reduce_documents(state: State):
+#     reduced_context = ask_llm(state["context"], "請為以下的文本生成摘要")
+#     breakpoint()
+#     return {"context": reduced_context}
+
+
+@log_node_execution("retrieval_documents")
+def retrieval_documents(state: State):
+    def cosine_similarity(vec1, vec2):
+        dot_product = np.dot(vec1, vec2)
+        norm_vec1 = np.linalg.norm(vec1)
+        norm_vec2 = np.linalg.norm(vec2)
+        return dot_product / (norm_vec1 * norm_vec2)
     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-
-    def process_embedding(content):
-        used_token = num_tokens_from_string(content)
-        return embeddings.embed_documents([content])[0], used_token
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            executor.submit(process_embedding, doc.page_content): i
-            for i, doc in enumerate(documents)
-        }
-        vectors = []
-
-        for future in as_completed(futures):
-            try:
-                result, used_token = future.result()
-                vectors.append(result)
-            except Exception as e:
-                print(f"Error embedding document index {futures[future]}: {e}")
-
-    vectors = np.array(vectors)
-    kmeans = KMeans(n_clusters=cluster_size, random_state=42).fit(vectors)
-
-    closest_indices = []
-    for i in range(cluster_size):
-        distances = np.linalg.norm(vectors - kmeans.cluster_centers_[i], axis=1)
-        closest_index = np.argmin(distances)
-        closest_indices.append(closest_index)
-
-    selected_indices = sorted(closest_indices)
-    new_docs = [documents[index] for index in selected_indices]
-    return {"chunked_documents": new_docs}
-
-
-@log_node_execution("need_cluster")
-def need_cluster(state: State) -> str:
-    if len(state["chunked_documents"]) > math.floor(
-        model_info[model_name].max_input / model_info[model_name].max_output
-    ):
-        return "Y"
-    return "N"
-
-
-@log_node_execution("calc_documents_token")
-def calc_documents_token(state: State):
-    token_calculator = TokenLengthCalculator(model_name)
-    total_tokens = 0
-    for doc in state["chunked_documents"]:
-        total_tokens += token_calculator.tiktoken_len(doc)
-    return {"total_tokens": total_tokens}
-
-
-@log_node_execution("need_map_reduce")
-def need_map_reduce(state: State) -> str:
-    if state["total_tokens"] > model_info[model_name].max_input:
-        return "Y"
-    return "N"
-
-
-@log_node_execution("map_reduce_documents")
-def map_reduce_documents(state: State):
-    summarize_text = ""
-    map_summarize = []
-    for doc in state["chunked_documents"]:
-        stripped_document = doc.replace("\n", " ").strip()
-        document_summarize = ask_llm(stripped_document, "請為以下的文本生成摘要")
-        map_summarize.append(document_summarize)
-        summarize_text += document_summarize
-    context = ask_llm(summarize_text, "請為以下的文本生成摘要")
+    chunk_embeddings = embeddings.embed_documents(state["chunked_documents"])
+    
+    embeddings_df = pd.DataFrame(chunk_embeddings)
+    embeddings_csv_path = "/webSearch/embeddings.csv"
+    embeddings_df.to_csv(embeddings_csv_path, index=False)
+    print(f"Embeddings saved to {embeddings_csv_path}")
+    
+    user_input_embedding = embeddings.embed_query(state["user_input"])
+    
+    def calculate_similarity(index):
+        return index, cosine_similarity(user_input_embedding, chunk_embeddings[index])
+    
+    with ThreadPoolExecutor() as executor:
+        similarities = list(executor.map(calculate_similarity, range(len(chunk_embeddings))))
+    
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    top_indices = [index for index, _ in similarities[:5]]
+    top_chunks = [state["chunked_documents"][i] for i in top_indices]
     breakpoint()
-    return {"context": context}
+    return {"context": top_chunks}
 
 
 @log_node_execution("combine_documents")
@@ -341,9 +388,11 @@ graph_builder.add_node("extract_web_search_keyword", extract_web_search_keyword)
 graph_builder.add_node("google_search", google_search)
 graph_builder.add_node("fetch_web_pages_to_documents", fetch_web_pages_to_documents)
 graph_builder.add_node("chunking_documents", chunking_documents)
-graph_builder.add_node("cluster_documents", cluster_documents)
-graph_builder.add_node("calc_documents_token", calc_documents_token)
-graph_builder.add_node("map_reduce_documents", map_reduce_documents)
+# graph_builder.add_node("cluster_documents", cluster_documents)
+# graph_builder.add_node("calc_documents_token", calc_documents_token)
+# graph_builder.add_node("map_documents", map_documents)
+# graph_builder.add_node("reduce_documents", reduce_documents)
+graph_builder.add_node("retrieval_documents", retrieval_documents)
 graph_builder.add_node("combine_documents", combine_documents)
 graph_builder.add_node("generate_ai_message", generate_ai_message)
 graph_builder.add_node(
@@ -364,18 +413,8 @@ graph_builder.add_edge(
 graph_builder.add_edge("extract_web_search_keyword", "google_search")
 graph_builder.add_edge("google_search", "fetch_web_pages_to_documents")
 graph_builder.add_edge("fetch_web_pages_to_documents", "chunking_documents")
-graph_builder.add_conditional_edges(
-    "chunking_documents",
-    need_cluster,
-    {"Y": "cluster_documents", "N": "calc_documents_token"},
-)
-graph_builder.add_edge("cluster_documents", "calc_documents_token")
-graph_builder.add_conditional_edges(
-    "calc_documents_token",
-    need_map_reduce,
-    {"Y": "map_reduce_documents", "N": "combine_documents"},
-)
-graph_builder.add_edge("map_reduce_documents", "combine_documents")
+graph_builder.add_edge("chunking_documents", "retrieval_documents")
+graph_builder.add_edge("retrieval_documents", "combine_documents")
 graph_builder.add_edge("combine_documents", "generate_ai_message")
 graph_builder.add_edge("chatbot", "print_answer")
 graph_builder.add_edge(
